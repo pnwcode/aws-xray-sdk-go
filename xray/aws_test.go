@@ -3,12 +3,15 @@ package xray
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"sync"
+	"testing"
+	"time"
+
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/aws/defaults"
 	"github.com/aws/aws-sdk-go-v2/service/lambda"
-	"net/http"
-	"net/http/httptest"
-	"testing"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -26,6 +29,7 @@ func TestAWS(t *testing.T) {
 		{"failed connection", testClientFailedConnection, true},
 		{"successful connection", testClientSuccessfulConnection, false},
 		{"without segment", testClientWithoutSegment, false},
+		{"test data race", testAWSDataRace, false},
 	}
 
 	onClient := func(s aws.Config) *lambda.Client {
@@ -180,4 +184,37 @@ func testClientWithoutSegment(t *testing.T, svc *lambda.Client) {
 	ctx := context.Background()
 	_, err := svc.ListFunctionsRequest(&lambda.ListFunctionsInput{}).Send(ctx)
 	assert.NoError(t, err)
+}
+
+func testAWSDataRace(t *testing.T, svc *lambda.Client) {
+	Configure(Config{ContextMissingStrategy: &TestContextMissingStrategy{}, DaemonAddr: "localhost:3000"})
+	defer ResetConfig()
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	ctx, seg := BeginSegment(ctx, "TestSegment")
+
+	wg := sync.WaitGroup{}
+
+	for i := 0; i < 5; i++ {
+		if i != 3 && i != 2 {
+			wg.Add(1)
+		}
+		go func(i int) {
+			if i != 3 && i != 2 {
+				time.Sleep(1)
+				defer wg.Done()
+			}
+			_, seg := BeginSubsegment(ctx, "TestSubsegment1")
+			time.Sleep(1)
+			seg.Close(nil)
+			svc.ListFunctionsRequest(&lambda.ListFunctionsInput{}).Send(ctx)
+			if i == 3 || i == 2 {
+				cancel() // cancel context
+			}
+		}(i)
+	}
+
+	wg.Wait()
+	seg.Close(nil)
 }

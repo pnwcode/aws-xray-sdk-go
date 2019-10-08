@@ -56,6 +56,7 @@ func (de *DefaultEmitter) refresh(raddr *net.UDPAddr) (err error) {
 }
 
 // Emit segment or subsegment if root segment is sampled.
+// seg has a write lock acquired by the caller.
 func (de *DefaultEmitter) Emit(seg *Segment) {
 	if seg == nil || !seg.ParentSegment.Sampled {
 		return
@@ -85,6 +86,7 @@ func (de *DefaultEmitter) Emit(seg *Segment) {
 	}
 }
 
+// seg has a write lock acquired by the caller.
 func packSegments(seg *Segment, outSegments [][]byte) [][]byte {
 	trimSubsegment := func(s *Segment) []byte {
 		ss := globalCfg.StreamingStrategy()
@@ -92,23 +94,28 @@ func packSegments(seg *Segment, outSegments [][]byte) [][]byte {
 			ss = seg.ParentSegment.Configuration.StreamingStrategy
 		}
 		for ss.RequiresStreaming(s) {
-			if len(s.RawSubsegments) == 0 {
+			if len(s.rawSubsegments) == 0 {
 				break
 			}
 			cb := ss.StreamCompletedSubsegments(s)
 			outSegments = append(outSegments, cb...)
 		}
-		b, _ := json.Marshal(s)
+		b, err := json.Marshal(s)
+		if err != nil {
+			logger.Errorf("JSON error while marshalling (Sub)Segment: %v", err)
+		}
 		return b
 	}
 
-	for _, s := range seg.RawSubsegments {
+	for _, s := range seg.rawSubsegments {
+		s.Lock()
 		outSegments = packSegments(s, outSegments)
 		if b := trimSubsegment(s); b != nil {
 			seg.Subsegments = append(seg.Subsegments, b)
 		}
+		s.Unlock()
 	}
-	if seg.parent == nil {
+	if seg.isOrphan() {
 		if b := trimSubsegment(seg); b != nil {
 			outSegments = append(outSegments, b)
 		}

@@ -13,12 +13,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"github.com/aws/aws-sdk-go-v2/aws"
 	"io/ioutil"
 	"net/http/httptrace"
 	"reflect"
 	"strings"
 	"unicode"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
 
 	"github.com/aws/aws-xray-sdk-go/internal/logger"
 	"github.com/aws/aws-xray-sdk-go/resources"
@@ -94,8 +95,13 @@ var xRayAfterSendHandler = aws.NamedHandler{
 		if curseg != nil && curseg.Name == "attempt" {
 			// An error could have prevented the connect subsegment from closing,
 			// so clean it up here.
-			for _, subsegment := range curseg.RawSubsegments {
-				if subsegment.Name == "connect" && subsegment.safeInProgress() {
+			curseg.RLock()
+			temp := make([]*Segment, len(curseg.rawSubsegments))
+			copy(temp, curseg.rawSubsegments)
+			curseg.RUnlock()
+
+			for _, subsegment := range temp {
+				if subsegment.getName() == "connect" && subsegment.safeInProgress() {
 					subsegment.Close(nil)
 					return
 				}
